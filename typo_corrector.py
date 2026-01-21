@@ -71,7 +71,7 @@ async def fix_section(client: anthropic.AsyncAnthropic, name: str, text: str) ->
     kwargs = {
         "model": MODEL,
         "system": SYSTEM_PROMPT,
-        "max_tokens": 64000,
+        "max_tokens": 16000,
         "temperature": 0,
         "messages": [{"role": "user", "content": PROMPT.format(text=text)}],
     }
@@ -99,6 +99,7 @@ async def main():
     parser = argparse.ArgumentParser(description="Fix typos in a markdown file using Claude")
     parser.add_argument("file", help="Path to the file to fix")
     parser.add_argument("--inplace", "-i", action="store_true", help="Modify the file in place")
+    parser.add_argument("--no-split", action="store_true", help="Don't split into sections by headers")
     args = parser.parse_args()
 
     input_path = Path(args.file).resolve()
@@ -109,10 +110,15 @@ async def main():
 
     all_text = input_path.read_text()
 
-    sections = split_all_by(
-        [("section", all_text)],
-        ["\n# ", "\n## ", "\n### ", "\n#### ", "\n##### ", "\n###### "]
-    )
+    # Only split by markdown headers for .md/.markdown files, unless --no-split is set
+    is_markdown = input_path.suffix.lower() in (".md", ".markdown")
+    if is_markdown and not args.no_split:
+        sections = split_all_by(
+            [("section", all_text)],
+            ["\n# ", "\n## ", "\n### ", "\n#### ", "\n##### ", "\n###### "]
+        )
+    else:
+        sections = [("section", all_text)]
 
     client = anthropic.AsyncAnthropic()
 
@@ -125,6 +131,10 @@ async def main():
 
     # Remove trailing newlines to match original style better
     total_new = total_new.rstrip() + "\n"
+
+    if total_new == all_text:
+        print("No change")
+        return 0
 
     if args.inplace:
         input_path.write_text(total_new)
