@@ -36,7 +36,9 @@ Your reliable knowledge cutoff date - the date past which you cannot answer ques
 ===END===
 """.strip()
 
-MODEL = "claude-sonnet-4-5-20250929"
+MODEL = "claude-opus-4-6"
+
+semaphore = asyncio.Semaphore(100)
 
 
 def individual_split_by(text: str, delimiter: str) -> list[str]:
@@ -71,7 +73,7 @@ async def fix_section(client: anthropic.AsyncAnthropic, name: str, text: str) ->
     kwargs = {
         "model": MODEL,
         "system": SYSTEM_PROMPT,
-        "max_tokens": 16000,
+        "max_tokens": 32000,
         "temperature": 0,
         "messages": [{"role": "user", "content": PROMPT.format(text=text)}],
     }
@@ -80,7 +82,43 @@ async def fix_section(client: anthropic.AsyncAnthropic, name: str, text: str) ->
     if cached is not None:
         return name, cached, text.strip()
 
-    response = await client.messages.create(**kwargs)
+    async with semaphore:
+        initial_delay = 0.5
+        max_delay = 10.0
+        max_retries = 10
+        delay = initial_delay
+
+        for attempt in range(max_retries):
+            try:
+                async with client.messages.stream(**kwargs) as stream:
+                    response = await asyncio.wait_for(
+                        stream.get_final_message(),
+                        timeout=1000,
+                    )
+                break
+            except asyncio.TimeoutError:
+                this_delay = min(delay, max_delay)
+                print(f"Timeout on attempt {attempt + 1}/{max_retries} for {name}, retrying with {this_delay=}...")
+                await asyncio.sleep(this_delay)
+                delay *= 2
+            except Exception as e:
+                err_string = str(e).lower()
+                if (
+                    "rate" in err_string
+                    or "overloaded" in err_string
+                    or "timeout" in err_string
+                    or "timed out" in err_string
+                    or "dropped connection" in err_string
+                    or any(code in err_string for code in ["429", "500", "502", "503", "504", "529"])
+                ):
+                    this_delay = min(delay, max_delay)
+                    print(f"Retryable error on attempt {attempt + 1}/{max_retries} for {name}: {e} ({type(e).__name__}, {this_delay=})")
+                    await asyncio.sleep(this_delay)
+                    delay *= 2
+                else:
+                    raise
+        else:
+            raise RuntimeError(f"Max retries exceeded for section: {name}")
 
     out = response.content[0].text
 
